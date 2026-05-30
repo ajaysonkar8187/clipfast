@@ -10,17 +10,16 @@ load_dotenv()
 app = FastAPI(title="ClipFast API")
 groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 
-# Node.js path for yt-dlp JavaScript runtime
-NODE_PATH = "C:\\Program Files\\nodejs"
-ENV_WITH_NODE = {**os.environ, "PATH": os.environ.get("PATH", "") + f";{NODE_PATH}"}
+# Detect if running on Windows or Linux
+IS_WINDOWS = os.name == "nt"
+FFMPEG = FFMPEG if IS_WINDOWS else "ffmpeg"
+FFMPEG_DIR = FFMPEG_DIR if IS_WINDOWS else "/usr/bin"
+NODE_PATH = "C:\\Program Files\\nodejs" if IS_WINDOWS else "/usr/bin"
+ENV_WITH_NODE = {**os.environ, "PATH": os.environ.get("PATH", "") + (f";{NODE_PATH}" if IS_WINDOWS else f":{NODE_PATH}")}
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-    "http://localhost:3000",
-    "https://clipfast-seven.vercel.app",
-    "https://*.vercel.app"
-],
+    allow_origins=["http://localhost:3000"],
     allow_methods=["*"],
     allow_headers=["*"],
     expose_headers=["Content-Range", "Accept-Ranges", "Content-Length"],
@@ -139,8 +138,7 @@ async def process_url(data: URLRequest):
             "-f", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
             "-o", video_path,
             "--force-overwrites",
-            "--ffmpeg-location", "C:\\ffmpeg\\bin",
-            "--js-runtime", "nodejs",
+            "--ffmpeg-location", FFMPEG_DIR,
             "--extractor-args", "youtube:skip=translated_subs",
             "--no-check-certificates",
             "--merge-output-format", "mp4",
@@ -152,7 +150,7 @@ async def process_url(data: URLRequest):
     # Extract audio from video for transcription
     try:
         subprocess.run([
-            "C:\\ffmpeg\\bin\\ffmpeg.exe",
+            FFMPEG,
             "-i", video_path,
             "-vn", "-acodec", "mp3",
             "-y", audio_path
@@ -190,7 +188,7 @@ async def process_file(
         video_path = path
         audio_path = "downloads/audio.mp3"
         subprocess.run([
-            "C:\\ffmpeg\\bin\\ffmpeg.exe",
+            FFMPEG,
             "-i", video_path,
             "-vn", "-acodec", "mp3",
             "-y", audio_path
@@ -206,7 +204,7 @@ async def process_audio(audio_path: str, video_path, clip_count: int, clip_lengt
     compressed_path = "downloads/audio_compressed.mp3"
     try:
         subprocess.run([
-            "C:\\ffmpeg\\bin\\ffmpeg.exe",
+            FFMPEG,
             "-i", audio_path,
             "-ar", "16000", "-ac", "1", "-b:a", "32k",
             "-y", compressed_path
@@ -287,7 +285,7 @@ async def export_clips(data: dict):
             pass
 
     zip_path = "exports/clips.zip"
-    ffmpeg = "C:\\ffmpeg\\bin\\ffmpeg.exe"
+    ffmpeg = FFMPEG
     exported_files = []
 
     for i, clip in enumerate(clips):
