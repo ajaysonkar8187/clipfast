@@ -107,49 +107,41 @@ def range_response(path: str, media_type: str, request: Request):
         )
 
 def download_youtube_video(url: str, output_path: str):
-    """Download YouTube video using yt-dlp with multiple fallback methods"""
+    """Download YouTube video using yt-dlp with cookies and multiple fallback methods"""
     os.makedirs("downloads", exist_ok=True)
 
-    # Method 1: Try with yt-dlp directly (works on some IPs)
-    methods = [
-        # Method 1: Standard with web client
-        [
-            "yt-dlp",
-            "-f", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
-            "-o", output_path,
-            "--force-overwrites",
-            "--merge-output-format", "mp4",
-            "--no-check-certificates",
-            "--extractor-args", "youtube:player_client=web",
-            "--add-header", "User-Agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        ],
-        # Method 2: Try with android client
-        [
-            "yt-dlp",
-            "-f", "best[ext=mp4]/best",
-            "-o", output_path,
-            "--force-overwrites",
-            "--merge-output-format", "mp4",
-            "--no-check-certificates",
-            "--extractor-args", "youtube:player_client=android",
-        ],
-        # Method 3: Try with mweb client
-        [
-            "yt-dlp",
-            "-f", "best",
-            "-o", output_path,
-            "--force-overwrites",
-            "--no-check-certificates",
-            "--extractor-args", "youtube:player_client=mweb",
-        ],
+    # Write cookies to file if available
+    cookies_file = None
+    youtube_cookies = os.getenv("YOUTUBE_COOKIES", "")
+    if youtube_cookies:
+        cookies_file = "downloads/cookies.txt"
+        with open(cookies_file, "w") as f:
+            f.write(youtube_cookies)
+
+    base_args = [
+        "--force-overwrites",
+        "--merge-output-format", "mp4",
+        "--no-check-certificates",
+        "--add-header", "User-Agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     ]
 
+    if cookies_file:
+        base_args += ["--cookies", cookies_file]
+
     if IS_WINDOWS:
-        for method in methods:
-            method += ["--ffmpeg-location", FFMPEG_DIR]
+        base_args += ["--ffmpeg-location", FFMPEG_DIR, "--js-runtime", "nodejs"]
+
+    methods = [
+        # Method 1: Best quality with cookies
+        ["yt-dlp", "-f", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best", "-o", output_path] + base_args,
+        # Method 2: Android client
+        ["yt-dlp", "-f", "best[ext=mp4]/best", "-o", output_path, "--extractor-args", "youtube:player_client=android"] + base_args,
+        # Method 3: Any best format
+        ["yt-dlp", "-f", "best", "-o", output_path, "--extractor-args", "youtube:player_client=web"] + base_args,
+    ]
 
     last_error = ""
-    for i, cmd in enumerate(methods):
+    for cmd in methods:
         try:
             cmd.append(url)
             result = subprocess.run(cmd, capture_output=True, timeout=300)
