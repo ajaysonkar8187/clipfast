@@ -1,0 +1,11 @@
+venv/
+__pycache__/
+.env
+downloads/
+exports/
+frontend/node_modules/
+frontend/.next/
+*.pyc
+*.pyo
+*.pyd
+*.exe
