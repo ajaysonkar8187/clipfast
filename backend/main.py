@@ -3,19 +3,17 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 from groq import Groq
-import subprocess, os, json, re, zipfile
+import subprocess, os, json, re, zipfile, requests
 from dotenv import load_dotenv
 
 load_dotenv()
 app = FastAPI(title="ClipFast API")
 groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+RAPIDAPI_KEY = os.getenv("RAPIDAPI_KEY", "")
 
-# Detect if running on Windows or Linux
 IS_WINDOWS = os.name == "nt"
-FFMPEG = FFMPEG if IS_WINDOWS else "ffmpeg"
-FFMPEG_DIR = FFMPEG_DIR if IS_WINDOWS else "/usr/bin"
-NODE_PATH = "C:\\Program Files\\nodejs" if IS_WINDOWS else "/usr/bin"
-ENV_WITH_NODE = {**os.environ, "PATH": os.environ.get("PATH", "") + (f";{NODE_PATH}" if IS_WINDOWS else f":{NODE_PATH}")}
+FFMPEG = "C:\\ffmpeg\\bin\\ffmpeg.exe" if IS_WINDOWS else "ffmpeg"
+FFMPEG_DIR = "C:\\ffmpeg\\bin" if IS_WINDOWS else "/usr/bin"
 
 app.add_middleware(
     CORSMiddleware,
@@ -73,7 +71,6 @@ async def serve_audio(request: Request):
 def range_response(path: str, media_type: str, request: Request):
     file_size = os.path.getsize(path)
     range_header = request.headers.get("range")
-
     if range_header:
         range_val = range_header.strip().replace("bytes=", "")
         parts = range_val.split("-")
@@ -81,7 +78,6 @@ def range_response(path: str, media_type: str, request: Request):
         end = int(parts[1]) if parts[1] else file_size - 1
         end = min(end, file_size - 1)
         chunk_size = end - start + 1
-
         def file_chunk():
             with open(path, "rb") as f:
                 f.seek(start)
@@ -92,11 +88,8 @@ def range_response(path: str, media_type: str, request: Request):
                         break
                     remaining -= len(data)
                     yield data
-
         return StreamingResponse(
-            file_chunk(),
-            status_code=206,
-            media_type=media_type,
+            file_chunk(), status_code=206, media_type=media_type,
             headers={
                 "Content-Range": f"bytes {start}-{end}/{file_size}",
                 "Accept-Ranges": "bytes",
@@ -108,21 +101,70 @@ def range_response(path: str, media_type: str, request: Request):
             with open(path, "rb") as f:
                 while chunk := f.read(65536):
                     yield chunk
-
         return StreamingResponse(
-            full_file(),
-            media_type=media_type,
-            headers={
-                "Accept-Ranges": "bytes",
-                "Content-Length": str(file_size),
-            }
+            full_file(), media_type=media_type,
+            headers={"Accept-Ranges": "bytes", "Content-Length": str(file_size)}
         )
+
+def download_youtube_video(url: str, output_path: str):
+    """Download YouTube video using yt-dlp with multiple fallback methods"""
+    os.makedirs("downloads", exist_ok=True)
+
+    # Method 1: Try with yt-dlp directly (works on some IPs)
+    methods = [
+        # Method 1: Standard with web client
+        [
+            "yt-dlp",
+            "-f", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
+            "-o", output_path,
+            "--force-overwrites",
+            "--merge-output-format", "mp4",
+            "--no-check-certificates",
+            "--extractor-args", "youtube:player_client=web",
+            "--add-header", "User-Agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        ],
+        # Method 2: Try with android client
+        [
+            "yt-dlp",
+            "-f", "best[ext=mp4]/best",
+            "-o", output_path,
+            "--force-overwrites",
+            "--merge-output-format", "mp4",
+            "--no-check-certificates",
+            "--extractor-args", "youtube:player_client=android",
+        ],
+        # Method 3: Try with mweb client
+        [
+            "yt-dlp",
+            "-f", "best",
+            "-o", output_path,
+            "--force-overwrites",
+            "--no-check-certificates",
+            "--extractor-args", "youtube:player_client=mweb",
+        ],
+    ]
+
+    if IS_WINDOWS:
+        for method in methods:
+            method += ["--ffmpeg-location", FFMPEG_DIR]
+
+    last_error = ""
+    for i, cmd in enumerate(methods):
+        try:
+            cmd.append(url)
+            result = subprocess.run(cmd, capture_output=True, timeout=300)
+            if result.returncode == 0 and os.path.exists(output_path):
+                return True
+            last_error = result.stderr.decode()
+        except Exception as e:
+            last_error = str(e)
+            continue
+
+    raise Exception(f"All download methods failed: {last_error}")
 
 @app.post("/process-url")
 async def process_url(data: URLRequest):
     os.makedirs("downloads", exist_ok=True)
-
-    # Clean old files
     for f in os.listdir("downloads"):
         try:
             os.remove(f"downloads/{f}")
@@ -132,29 +174,15 @@ async def process_url(data: URLRequest):
     video_path = "downloads/video.mp4"
     audio_path = "downloads/audio.mp3"
 
-    # Download full video with Node.js runtime for YouTube
     try:
-        subprocess.run([
-            "yt-dlp",
-            "-f", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
-            "-o", video_path,
-            "--force-overwrites",
-            "--ffmpeg-location", FFMPEG_DIR,
-            "--extractor-args", "youtube:skip=translated_subs",
-            "--no-check-certificates",
-            "--merge-output-format", "mp4",
-            data.url
-        ], check=True, capture_output=True, env=ENV_WITH_NODE)
-    except subprocess.CalledProcessError as e:
-        raise HTTPException(status_code=400, detail=f"Failed to download video: {e.stderr.decode()}")
+        download_youtube_video(data.url, video_path)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Failed to download video: {str(e)}")
 
-    # Extract audio from video for transcription
     try:
         subprocess.run([
-            FFMPEG,
-            "-i", video_path,
-            "-vn", "-acodec", "mp3",
-            "-y", audio_path
+            FFMPEG, "-i", video_path,
+            "-vn", "-acodec", "mp3", "-y", audio_path
         ], check=True, capture_output=True)
     except subprocess.CalledProcessError as e:
         raise HTTPException(status_code=500, detail=f"Audio extraction failed: {e.stderr.decode()}")
@@ -169,8 +197,6 @@ async def process_file(
     niche: str = "Podcast"
 ):
     os.makedirs("downloads", exist_ok=True)
-
-    # Clean old files
     for f in os.listdir("downloads"):
         try:
             os.remove(f"downloads/{f}")
@@ -188,32 +214,30 @@ async def process_file(
     if ext in video_extensions:
         video_path = path
         audio_path = "downloads/audio.mp3"
+        # Extract audio from video for transcription
         subprocess.run([
-            FFMPEG,
-            "-i", video_path,
-            "-vn", "-acodec", "mp3",
-            "-y", audio_path
+            FFMPEG, "-i", video_path,
+            "-vn", "-acodec", "mp3", "-y", audio_path
         ], check=True, capture_output=True)
+        has_video = True
     else:
         video_path = None
         audio_path = path
+        has_video = False
 
     return await process_audio(audio_path, video_path, clip_count, clip_length, niche)
 
 async def process_audio(audio_path: str, video_path, clip_count: int, clip_length: int, niche: str):
-    # Compress audio to under 25MB for Groq free tier
     compressed_path = "downloads/audio_compressed.mp3"
     try:
         subprocess.run([
-            FFMPEG,
-            "-i", audio_path,
+            FFMPEG, "-i", audio_path,
             "-ar", "16000", "-ac", "1", "-b:a", "32k",
             "-y", compressed_path
         ], check=True, capture_output=True)
     except subprocess.CalledProcessError as e:
         raise HTTPException(status_code=500, detail=f"Audio compression failed: {e.stderr.decode()}")
 
-    # Step 1: Transcribe with Groq Whisper (free)
     try:
         with open(compressed_path, "rb") as f:
             transcript = groq_client.audio.transcriptions.create(
@@ -230,7 +254,6 @@ async def process_audio(audio_path: str, video_path, clip_count: int, clip_lengt
         for s in transcript.segments
     ])
 
-    # Step 2: Groq LLM picks best clips (free)
     try:
         response = groq_client.chat.completions.create(
             model="llama-3.3-70b-versatile",
@@ -277,8 +300,6 @@ async def export_clips(data: dict):
     has_video = data.get("has_video", False)
 
     os.makedirs("exports", exist_ok=True)
-
-    # Clean old exports
     for f in os.listdir("exports"):
         try:
             os.remove(f"exports/{f}")
@@ -286,7 +307,6 @@ async def export_clips(data: dict):
             pass
 
     zip_path = "exports/clips.zip"
-    ffmpeg = FFMPEG
     exported_files = []
 
     for i, clip in enumerate(clips):
@@ -295,51 +315,40 @@ async def export_clips(data: dict):
         tag = clip.get("tag", "clip").replace("/", "-").replace(" ", "_")
 
         if has_video and video_path and os.path.exists(str(video_path)):
+            # Export as MP4 video clip
             clip_path = os.path.abspath(f"exports/clip_{i+1}_{tag}.mp4")
             cmd = [
-                ffmpeg,
+                FFMPEG,
                 "-ss", start,
                 "-i", str(video_path),
                 "-t", duration,
-                "-c", "copy",
+                "-c:v", "libx264",
+                "-c:a", "aac",
                 "-avoid_negative_ts", "make_zero",
+                "-movflags", "+faststart",
                 "-y", clip_path
             ]
         else:
+            # Export as MP3 audio clip (audio-only files)
             src = str(audio_path) if audio_path and os.path.exists(str(audio_path)) else "downloads/audio_compressed.mp3"
             clip_path = os.path.abspath(f"exports/clip_{i+1}_{tag}.mp3")
-            cmd = [
-                ffmpeg,
-                "-ss", start,
-                "-i", src,
-                "-t", duration,
-                "-c", "copy",
-                "-y", clip_path
-            ]
+            cmd = [FFMPEG, "-ss", start, "-i", src, "-t", duration, "-c", "copy", "-y", clip_path]
 
         try:
             result = subprocess.run(cmd, capture_output=True, timeout=120)
             if result.returncode == 0 and os.path.exists(clip_path) and os.path.getsize(clip_path) > 0:
                 exported_files.append(clip_path)
-            else:
-                print(f"FFmpeg error for clip {i+1}: {result.stderr.decode()}")
-        except subprocess.TimeoutExpired:
-            print(f"Timeout on clip {i+1}")
-            continue
         except Exception as ex:
-            print(f"Error on clip {i+1}: {ex}")
             continue
 
     if not exported_files:
-        raise HTTPException(status_code=500, detail="No clips could be exported. Check that your video file exists and ffmpeg is working.")
+        raise HTTPException(status_code=500, detail="No clips could be exported.")
 
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zipf:
         for fp in exported_files:
             zipf.write(fp, os.path.basename(fp))
 
     return FileResponse(
-        zip_path,
-        media_type="application/zip",
-        filename="clipfast_exports.zip",
+        zip_path, media_type="application/zip", filename="clipfast_exports.zip",
         headers={"Content-Disposition": "attachment; filename=clipfast_exports.zip"}
     )
