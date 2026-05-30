@@ -16,7 +16,11 @@ ENV_WITH_NODE = {**os.environ, "PATH": os.environ.get("PATH", "") + f";{NODE_PAT
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
+    allow_origins=[
+    "http://localhost:3000",
+    "https://clipfast-seven.vercel.app",
+    "https://*.vercel.app"
+],
     allow_methods=["*"],
     allow_headers=["*"],
     expose_headers=["Content-Range", "Accept-Ranges", "Content-Length"],
