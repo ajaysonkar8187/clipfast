@@ -3,13 +3,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 from groq import Groq
-import subprocess, os, json, re, zipfile, requests
+import subprocess, os, json, re, zipfile, math
 from dotenv import load_dotenv
 
 load_dotenv()
 app = FastAPI(title="ClipFast API")
 groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
-RAPIDAPI_KEY = os.getenv("RAPIDAPI_KEY", "")
 
 IS_WINDOWS = os.name == "nt"
 FFMPEG = "C:\\ffmpeg\\bin\\ffmpeg.exe" if IS_WINDOWS else "ffmpeg"
@@ -106,93 +105,175 @@ def range_response(path: str, media_type: str, request: Request):
             headers={"Accept-Ranges": "bytes", "Content-Length": str(file_size)}
         )
 
-def download_youtube_video(url: str, output_path: str):
-    """Download YouTube video using yt-dlp with cookies and multiple fallback methods"""
-    os.makedirs("downloads", exist_ok=True)
-
-    # Write cookies to file if available
-    cookies_file = None
+def write_cookies_file():
+    """Write YouTube cookies from environment variable to file"""
     youtube_cookies = os.getenv("YOUTUBE_COOKIES", "")
-    if youtube_cookies:
-        cookies_file = "downloads/cookies.txt"
-        # Fix cookie format - replace spaces between fields with tabs
-        lines = []
-        for line in youtube_cookies.strip().split("\n"):
-            line = line.strip()
-            if line.startswith("#") or not line:
-                lines.append(line)
+    if not youtube_cookies:
+        return None
+    cookies_file = "downloads/cookies.txt"
+    os.makedirs("downloads", exist_ok=True)
+    lines = []
+    for line in youtube_cookies.strip().split("\n"):
+        line = line.strip()
+        if line.startswith("#") or not line:
+            lines.append(line)
+        else:
+            parts = line.split()
+            if len(parts) >= 7:
+                lines.append("\t".join(parts[:7]))
             else:
-                # Split on whitespace and rejoin with tabs
-                parts = line.split()
-                if len(parts) >= 7:
-                    lines.append("\t".join(parts[:7]))
-                else:
-                    lines.append(line)
-        with open(cookies_file, "w") as f:
-            f.write("\n".join(lines))
+                lines.append(line)
+    with open(cookies_file, "w") as f:
+        f.write("\n".join(lines))
+    return cookies_file
 
-    base_args = [
-        "--force-overwrites",
-        "--merge-output-format", "mp4",
-        "--no-check-certificates",
-        "--add-header", "User-Agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    ]
+def compress_audio(input_path: str, output_path: str):
+    """Compress audio to low bitrate for Groq"""
+    subprocess.run([
+        FFMPEG, "-i", input_path,
+        "-ar", "16000", "-ac", "1", "-b:a", "32k",
+        "-y", output_path
+    ], check=True, capture_output=True)
 
-    if cookies_file:
-        base_args += ["--cookies", cookies_file]
+def get_audio_duration(audio_path: str) -> float:
+    """Get duration of audio file in seconds"""
+    result = subprocess.run([
+        FFMPEG, "-i", audio_path,
+        "-f", "null", "-"
+    ], capture_output=True, text=True)
+    # Parse duration from stderr
+    for line in result.stderr.split("\n"):
+        if "Duration" in line:
+            time_str = line.split("Duration:")[1].split(",")[0].strip()
+            parts = time_str.split(":")
+            if len(parts) == 3:
+                h, m, s = parts
+                return float(h) * 3600 + float(m) * 60 + float(s)
+    return 0
 
-    if IS_WINDOWS:
-        base_args += ["--ffmpeg-location", FFMPEG_DIR, "--js-runtime", "nodejs"]
+def split_audio(audio_path: str, chunk_duration: int = 1200) -> list:
+    """Split audio into chunks of chunk_duration seconds (default 20 min)"""
+    duration = get_audio_duration(audio_path)
+    if duration <= chunk_duration:
+        return [audio_path]
+    
+    chunks = []
+    num_chunks = math.ceil(duration / chunk_duration)
+    os.makedirs("downloads/chunks", exist_ok=True)
+    
+    for i in range(num_chunks):
+        start = i * chunk_duration
+        chunk_path = f"downloads/chunks/chunk_{i}.mp3"
+        subprocess.run([
+            FFMPEG, "-i", audio_path,
+            "-ss", str(start),
+            "-t", str(chunk_duration),
+            "-c", "copy",
+            "-y", chunk_path
+        ], check=True, capture_output=True)
+        chunks.append((chunk_path, start))
+    
+    return chunks
 
-    methods = [
-        # Method 1: Best quality with cookies
-        ["yt-dlp", "-f", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best", "-o", output_path] + base_args,
-        # Method 2: Android client
-        ["yt-dlp", "-f", "best[ext=mp4]/best", "-o", output_path, "--extractor-args", "youtube:player_client=android"] + base_args,
-        # Method 3: Any best format
-        ["yt-dlp", "-f", "best", "-o", output_path, "--extractor-args", "youtube:player_client=web"] + base_args,
-    ]
-
-    last_error = ""
-    for cmd in methods:
-        try:
-            cmd.append(url)
-            result = subprocess.run(cmd, capture_output=True, timeout=300)
-            if result.returncode == 0 and os.path.exists(output_path):
-                return True
-            last_error = result.stderr.decode()
-        except Exception as e:
-            last_error = str(e)
-            continue
-
-    raise Exception(f"All download methods failed: {last_error}")
+def transcribe_audio(audio_path: str) -> list:
+    """Transcribe audio, handling long files by chunking"""
+    compressed = audio_path.replace(".mp3", "_compressed.mp3")
+    
+    # Compress audio
+    compress_audio(audio_path, compressed)
+    
+    file_size = os.path.getsize(compressed)
+    max_size = 24 * 1024 * 1024  # 24MB limit for Groq
+    
+    if file_size <= max_size:
+        # Single file transcription
+        with open(compressed, "rb") as f:
+            transcript = groq_client.audio.transcriptions.create(
+                model="whisper-large-v3",
+                file=f,
+                response_format="verbose_json",
+                timestamp_granularities=["segment"]
+            )
+        return transcript.segments
+    else:
+        # Split into chunks and transcribe each
+        chunks = split_audio(compressed, chunk_duration=1200)
+        all_segments = []
+        
+        for chunk_info in chunks:
+            if isinstance(chunk_info, tuple):
+                chunk_path, time_offset = chunk_info
+            else:
+                chunk_path, time_offset = chunk_info, 0
+            
+            # Compress chunk
+            chunk_compressed = chunk_path.replace(".mp3", "_c.mp3")
+            compress_audio(chunk_path, chunk_compressed)
+            
+            with open(chunk_compressed, "rb") as f:
+                transcript = groq_client.audio.transcriptions.create(
+                    model="whisper-large-v3",
+                    file=f,
+                    response_format="verbose_json",
+                    timestamp_granularities=["segment"]
+                )
+            
+            # Adjust timestamps based on chunk offset
+            for seg in transcript.segments:
+                seg['start'] += time_offset
+                seg['end'] += time_offset
+                all_segments.append(seg)
+        
+        return all_segments
 
 @app.post("/process-url")
 async def process_url(data: URLRequest):
     os.makedirs("downloads", exist_ok=True)
     for f in os.listdir("downloads"):
         try:
-            os.remove(f"downloads/{f}")
+            if os.path.isfile(f"downloads/{f}"):
+                os.remove(f"downloads/{f}")
         except:
             pass
 
-    video_path = "downloads/video.mp4"
     audio_path = "downloads/audio.mp3"
+    cookies_file = write_cookies_file()
 
-    try:
-        download_youtube_video(data.url, video_path)
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Failed to download video: {str(e)}")
+    base_args = [
+        "--force-overwrites",
+        "--no-check-certificates",
+        "--add-header", "User-Agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+    ]
+    if cookies_file:
+        base_args += ["--cookies", cookies_file]
+    if IS_WINDOWS:
+        base_args += ["--ffmpeg-location", FFMPEG_DIR, "--js-runtime", "nodejs"]
 
-    try:
-        subprocess.run([
-            FFMPEG, "-i", video_path,
-            "-vn", "-acodec", "mp3", "-y", audio_path
-        ], check=True, capture_output=True)
-    except subprocess.CalledProcessError as e:
-        raise HTTPException(status_code=500, detail=f"Audio extraction failed: {e.stderr.decode()}")
+    # Download audio only — fast even for long videos
+    methods = [
+        ["yt-dlp", "-f", "bestaudio[ext=m4a]/bestaudio/best", "-x", "--audio-format", "mp3", "--audio-quality", "5", "-o", audio_path] + base_args,
+        ["yt-dlp", "-x", "--audio-format", "mp3", "--audio-quality", "5", "-o", audio_path, "--extractor-args", "youtube:player_client=android"] + base_args,
+        ["yt-dlp", "-x", "--audio-format", "mp3", "-o", audio_path] + base_args,
+    ]
 
-    return await process_audio(audio_path, video_path, data.clip_count, data.clip_length, data.niche)
+    last_error = ""
+    downloaded = False
+    for cmd in methods:
+        try:
+            cmd.append(data.url)
+            result = subprocess.run(cmd, capture_output=True, timeout=600)
+            if result.returncode == 0 and os.path.exists(audio_path):
+                downloaded = True
+                break
+            last_error = result.stderr.decode()
+        except Exception as e:
+            last_error = str(e)
+            continue
+
+    if not downloaded:
+        raise HTTPException(status_code=400, detail=f"Failed to download video: {last_error}")
+
+    return await process_audio(audio_path, None, data.clip_count, data.clip_length, data.niche)
 
 @app.post("/process-file")
 async def process_file(
@@ -204,7 +285,8 @@ async def process_file(
     os.makedirs("downloads", exist_ok=True)
     for f in os.listdir("downloads"):
         try:
-            os.remove(f"downloads/{f}")
+            if os.path.isfile(f"downloads/{f}"):
+                os.remove(f"downloads/{f}")
         except:
             pass
 
@@ -214,50 +296,38 @@ async def process_file(
         f.write(await file.read())
 
     video_extensions = ["mp4", "mov", "mkv", "webm", "avi"]
-    audio_extensions = ["mp3", "wav", "m4a", "aac", "ogg"]
-
     if ext in video_extensions:
         video_path = path
         audio_path = "downloads/audio.mp3"
-        # Extract audio from video for transcription
         subprocess.run([
             FFMPEG, "-i", video_path,
             "-vn", "-acodec", "mp3", "-y", audio_path
         ], check=True, capture_output=True)
-        has_video = True
     else:
         video_path = None
         audio_path = path
-        has_video = False
 
     return await process_audio(audio_path, video_path, clip_count, clip_length, niche)
 
 async def process_audio(audio_path: str, video_path, clip_count: int, clip_length: int, niche: str):
-    compressed_path = "downloads/audio_compressed.mp3"
+    # Transcribe with chunking support for long videos
     try:
-        subprocess.run([
-            FFMPEG, "-i", audio_path,
-            "-ar", "16000", "-ac", "1", "-b:a", "32k",
-            "-y", compressed_path
-        ], check=True, capture_output=True)
-    except subprocess.CalledProcessError as e:
-        raise HTTPException(status_code=500, detail=f"Audio compression failed: {e.stderr.decode()}")
-
-    try:
-        with open(compressed_path, "rb") as f:
-            transcript = groq_client.audio.transcriptions.create(
-                model="whisper-large-v3",
-                file=f,
-                response_format="verbose_json",
-                timestamp_granularities=["segment"]
-            )
+        segments = transcribe_audio(audio_path)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Transcription failed: {str(e)}")
 
+    if not segments:
+        raise HTTPException(status_code=500, detail="No speech found in audio")
+
     segments_text = "\n".join([
         f"[{s['start']:.0f}s - {s['end']:.0f}s]: {s['text']}"
-        for s in transcript.segments
+        for s in segments
     ])
+
+    # Limit transcript length for AI to avoid token limits
+    max_chars = 12000
+    if len(segments_text) > max_chars:
+        segments_text = segments_text[:max_chars] + "\n...[transcript continues]"
 
     try:
         response = groq_client.chat.completions.create(
@@ -294,7 +364,7 @@ Transcript:
         "audio_path": audio_path,
         "video_path": video_path,
         "has_video": video_path is not None and os.path.exists(str(video_path)),
-        "total_duration": transcript.segments[-1]["end"] if transcript.segments else 0
+        "total_duration": segments[-1]["end"] if segments else 0
     }
 
 @app.post("/export")
@@ -320,21 +390,11 @@ async def export_clips(data: dict):
         tag = clip.get("tag", "clip").replace("/", "-").replace(" ", "_")
 
         if has_video and video_path and os.path.exists(str(video_path)):
-            # Export as MP4 video clip
             clip_path = os.path.abspath(f"exports/clip_{i+1}_{tag}.mp4")
-            cmd = [
-                FFMPEG,
-                "-ss", start,
-                "-i", str(video_path),
-                "-t", duration,
-                "-c:v", "libx264",
-                "-c:a", "aac",
-                "-avoid_negative_ts", "make_zero",
-                "-movflags", "+faststart",
-                "-y", clip_path
-            ]
+            cmd = [FFMPEG, "-ss", start, "-i", str(video_path), "-t", duration,
+                   "-c:v", "libx264", "-c:a", "aac", "-avoid_negative_ts", "make_zero",
+                   "-movflags", "+faststart", "-y", clip_path]
         else:
-            # Export as MP3 audio clip (audio-only files)
             src = str(audio_path) if audio_path and os.path.exists(str(audio_path)) else "downloads/audio_compressed.mp3"
             clip_path = os.path.abspath(f"exports/clip_{i+1}_{tag}.mp3")
             cmd = [FFMPEG, "-ss", start, "-i", src, "-t", duration, "-c", "copy", "-y", clip_path]
@@ -343,7 +403,7 @@ async def export_clips(data: dict):
             result = subprocess.run(cmd, capture_output=True, timeout=120)
             if result.returncode == 0 and os.path.exists(clip_path) and os.path.getsize(clip_path) > 0:
                 exported_files.append(clip_path)
-        except Exception as ex:
+        except Exception:
             continue
 
     if not exported_files:
