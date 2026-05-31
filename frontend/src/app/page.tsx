@@ -2,7 +2,7 @@
 import { useState, useRef, useEffect } from "react";
 import axios from "axios";
 
-const API = "https://clipfast-backend.onrender.com";
+const API = "https://clipfast-backend-production.up.railway.app";
 
 type Clip = {
   title: string;
