@@ -2,7 +2,7 @@
 import { useState, useRef, useEffect } from "react";
 import axios from "axios";
 
-const API = "https://clipfast-backend-production.up.railway.app";
+const API = "http://localhost:8000";
 
 type Clip = {
   title: string;
@@ -377,30 +377,35 @@ export default function Home() {
               </div>
             </div>
 
-            {/* YouTube URL — Active */}
-            <div style={{ background: "var(--bg2)", border: "1px solid var(--border)", borderRadius: 16, padding: 24, marginBottom: 16 }}>
-              <label style={{ fontSize: 12, color: "var(--text2)", fontFamily: "'Syne', sans-serif", fontWeight: 600, letterSpacing: "0.08em", textTransform: "uppercase", display: "block", marginBottom: 12 }}>YouTube / Spotify URL</label>
-              <div style={{ display: "flex", gap: 10 }}>
-                <input value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://youtube.com/watch?v=..." onKeyDown={(e) => e.key === "Enter" && url && handleProcess()}
-                  style={{ flex: 1, background: "var(--bg3)", border: "1px solid var(--border2)", borderRadius: 10, padding: "12px 16px", color: "var(--text)", fontSize: 14, outline: "none" }} />
-                <button onClick={() => handleProcess()} disabled={!url}
-                  style={{ background: url ? "linear-gradient(135deg, #6c63ff, #a89cff)" : "var(--bg3)", border: "none", borderRadius: 10, padding: "12px 24px", color: url ? "white" : "var(--text2)", fontSize: 14, fontFamily: "'Syne', sans-serif", fontWeight: 700, cursor: url ? "pointer" : "not-allowed", whiteSpace: "nowrap", transition: "all 0.15s" }}>
-                  Generate clips ⚡
-                </button>
-              </div>
-            </div>
-
-            {/* File Upload */}
+            {/* File Upload — Primary */}
             <div onClick={() => fileRef.current?.click()}
-              style={{ border: "1.5px dashed var(--border2)", borderRadius: 16, padding: "28px 20px", textAlign: "center", cursor: "pointer", background: "var(--bg2)", marginBottom: 24, transition: "border-color 0.15s" }}
-              onMouseEnter={(e) => (e.currentTarget.style.borderColor = "#6c63ff")}
-              onMouseLeave={(e) => (e.currentTarget.style.borderColor = "var(--border2)")}>
-              <div style={{ fontSize: 28, marginBottom: 8 }}>📁</div>
-              <div style={{ fontSize: 14, color: "var(--text2)" }}>
-                Or <span style={{ color: "#a89cff", fontWeight: 600 }}>upload a video or audio file</span> — MP4, MOV, MP3, WAV
+              style={{ border: "2px dashed rgba(108,99,255,0.4)", borderRadius: 16, padding: "36px 20px", textAlign: "center", cursor: "pointer", background: "rgba(108,99,255,0.05)", marginBottom: 16, transition: "all 0.2s" }}
+              onMouseEnter={(e) => { e.currentTarget.style.borderColor = "#6c63ff"; e.currentTarget.style.background = "rgba(108,99,255,0.1)"; }}
+              onMouseLeave={(e) => { e.currentTarget.style.borderColor = "rgba(108,99,255,0.4)"; e.currentTarget.style.background = "rgba(108,99,255,0.05)"; }}>
+              <div style={{ fontSize: 40, marginBottom: 12 }}>📁</div>
+              <div style={{ fontSize: 16, fontWeight: 600, color: "var(--text)", marginBottom: 6 }}>Upload your video or audio file</div>
+              <div style={{ fontSize: 13, color: "var(--text2)", marginBottom: 16 }}>MP4, MOV, MP3, WAV — up to 4 hours long</div>
+              <div style={{ display: "inline-block", background: "linear-gradient(135deg, #6c63ff, #a89cff)", color: "white", borderRadius: 10, padding: "10px 28px", fontSize: 14, fontFamily: "'Syne', sans-serif", fontWeight: 700 }}>
+                Choose file ⚡
               </div>
               <input ref={fileRef} type="file" accept="video/*,audio/*" style={{ display: "none" }}
                 onChange={(e) => e.target.files?.[0] && handleProcess(e.target.files[0])} />
+            </div>
+
+            {/* YouTube URL — Coming Soon */}
+            <div style={{ background: "var(--bg2)", border: "1px solid var(--border)", borderRadius: 16, padding: 20, marginBottom: 24, opacity: 0.6 }}>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
+                <label style={{ fontSize: 12, color: "var(--text2)", fontFamily: "'Syne', sans-serif", fontWeight: 600, letterSpacing: "0.08em", textTransform: "uppercase" }}>YouTube / Spotify URL</label>
+                <span style={{ fontSize: 11, background: "rgba(255,193,7,0.15)", color: "#ffd54f", border: "1px solid rgba(255,193,7,0.3)", borderRadius: 99, padding: "2px 10px", fontFamily: "'Syne', sans-serif", fontWeight: 600 }}>Coming Soon</span>
+              </div>
+              <div style={{ display: "flex", gap: 10 }}>
+                <input disabled placeholder="https://youtube.com/watch?v=... (coming soon)"
+                  style={{ flex: 1, background: "var(--bg3)", border: "1px solid var(--border)", borderRadius: 10, padding: "12px 16px", color: "var(--text2)", fontSize: 14, outline: "none", cursor: "not-allowed" }} />
+                <button disabled
+                  style={{ background: "var(--bg3)", border: "none", borderRadius: 10, padding: "12px 24px", color: "var(--text2)", fontSize: 14, fontFamily: "'Syne', sans-serif", fontWeight: 700, cursor: "not-allowed", whiteSpace: "nowrap" }}>
+                  Generate clips ⚡
+                </button>
+              </div>
             </div>
 
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 24 }}>
