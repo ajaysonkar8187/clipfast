@@ -115,8 +115,21 @@ def download_youtube_video(url: str, output_path: str):
     youtube_cookies = os.getenv("YOUTUBE_COOKIES", "")
     if youtube_cookies:
         cookies_file = "downloads/cookies.txt"
+        # Fix cookie format - replace spaces between fields with tabs
+        lines = []
+        for line in youtube_cookies.strip().split("\n"):
+            line = line.strip()
+            if line.startswith("#") or not line:
+                lines.append(line)
+            else:
+                # Split on whitespace and rejoin with tabs
+                parts = line.split()
+                if len(parts) >= 7:
+                    lines.append("\t".join(parts[:7]))
+                else:
+                    lines.append(line)
         with open(cookies_file, "w") as f:
-            f.write(youtube_cookies)
+            f.write("\n".join(lines))
 
     base_args = [
         "--force-overwrites",
